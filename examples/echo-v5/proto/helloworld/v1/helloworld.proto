@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package helloworld.v1;
+
+import "buf/validate/validate.proto";
+import "google/api/annotations.proto";
+
+message SayHelloRequest {
+  string name = 1 [(buf.validate.field).string = {
+    min_len: 2
+    max_len: 64
+  }];
+}
+
+message SayHelloResponse {
+  string message = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+message LuckySearchRequest {
+  string keyword = 1 [(buf.validate.field).string = {
+    min_len: 2
+    max_len: 128
+  }];
+  int32 limit = 2 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 10
+  }];
+}
+
+message LuckySearchResponse {
+  repeated string results = 1 [(buf.validate.field).repeated.min_items = 1];
+}
+
+message CreateGreetingRequest {
+  string name = 1 [(buf.validate.field).string = {
+    min_len: 2
+    max_len: 64
+  }];
+  string message = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+}
+
+message CreateGreetingResponse {
+  string id = 1 [(buf.validate.field).string.min_len = 1];
+  string message = 2 [(buf.validate.field).string.min_len = 1];
+}
+
+service GreeterService {
+  rpc SayHello(SayHelloRequest) returns (SayHelloResponse) {
+    option (google.api.http) = {
+      get: "/helloworld/{name}"
+    };
+  }
+
+  rpc LuckySearch(LuckySearchRequest) returns (LuckySearchResponse) {
+    option (google.api.http) = {
+      get: "/search/{keyword}"
+    };
+  }
+
+  rpc CreateGreeting(CreateGreetingRequest) returns (CreateGreetingResponse) {
+    option (google.api.http) = {
+      post: "/greetings"
+      body: "*"
+      response_body: "message"
+    };
+  }
+}
