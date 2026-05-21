@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/ca-x/bufplugins/runtime/httpadapter"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -28,6 +27,11 @@ type DefaultWriter struct {
 	MarshalOptions protojson.MarshalOptions
 }
 
+type selectedBody struct {
+	message proto.Message
+	fields  []protoreflect.FieldDescriptor
+}
+
 func NewDefaultWriter() DefaultWriter {
 	return DefaultWriter{
 		MarshalOptions: protojson.MarshalOptions{
@@ -42,7 +46,7 @@ func (w DefaultWriter) Write(_ context.Context, resp Response, _ httpadapter.Met
 	if src == nil {
 		return resp.NoContent(http.StatusNoContent)
 	}
-	selected, ok, err := selectBody(src, rule.ResponseBody)
+	selected, ok, err := selectBody(src, rule)
 	if err != nil {
 		return err
 	}
@@ -57,51 +61,68 @@ func (w DefaultWriter) Write(_ context.Context, resp Response, _ httpadapter.Met
 	return resp.JSONBlob(status, data)
 }
 
-func selectBody(src proto.Message, selector string) (any, bool, error) {
+func selectBody(src proto.Message, rule httpadapter.HTTPBinding) (any, bool, error) {
+	selector := rule.ResponseBody
 	if selector == "" || selector == "*" {
 		return src, true, nil
 	}
 	msg := src.ProtoReflect()
-	value, present, err := valueBySelector(msg, selector)
-	if err != nil {
-		return nil, false, err
+	fields := rule.ResponseBodyFieldPath
+	var present bool
+	var err error
+	if len(fields) == 0 {
+		_, fields, present, err = valueBySelector(msg, selector)
+		if err != nil {
+			return nil, false, err
+		}
+	} else {
+		present, err = hasFieldPath(msg, fields)
+		if err != nil {
+			return nil, false, err
+		}
 	}
-	if !value.IsValid() || !present {
+	if !present {
 		return nil, false, nil
 	}
-	return value.Interface(), true, nil
+	return selectedBody{message: src, fields: fields}, true, nil
 }
 
-func valueBySelector(msg protoreflect.Message, selector string) (protoreflect.Value, bool, error) {
-	var field protoreflect.FieldDescriptor
+func valueBySelector(msg protoreflect.Message, selector string) (protoreflect.Value, []protoreflect.FieldDescriptor, bool, error) {
+	fields, err := httpadapter.CompileFieldPath(msg.Descriptor(), selector)
+	if err != nil {
+		return protoreflect.Value{}, nil, false, fmt.Errorf("response field %q: %w", selector, err)
+	}
+	value, present, err := valueByFieldPath(msg, fields)
+	return value, fields, present, err
+}
+
+func hasFieldPath(msg protoreflect.Message, fields []protoreflect.FieldDescriptor) (bool, error) {
+	_, present, err := valueByFieldPath(msg, fields)
+	return present, err
+}
+
+func valueByFieldPath(msg protoreflect.Message, fields []protoreflect.FieldDescriptor) (protoreflect.Value, bool, error) {
 	current := msg
-	parts := strings.Split(selector, ".")
-	for i, part := range parts {
-		field = findField(current.Descriptor(), part)
-		if field == nil {
-			return protoreflect.Value{}, false, fmt.Errorf("response field %q not found", selector)
-		}
+	for i, field := range fields {
 		value := current.Get(field)
-		if i == len(parts)-1 {
+		if i == len(fields)-1 {
 			return value, current.Has(field), nil
 		}
 		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
-			return protoreflect.Value{}, false, fmt.Errorf("response field %q is not a message", part)
+			return protoreflect.Value{}, false, fmt.Errorf("response field %q is not a message", field.Name())
+		}
+		if !current.Has(field) {
+			return protoreflect.Value{}, false, nil
 		}
 		current = value.Message()
 	}
 	return protoreflect.Value{}, false, nil
 }
 
-func findField(desc protoreflect.MessageDescriptor, name string) protoreflect.FieldDescriptor {
-	if field := desc.Fields().ByName(protoreflect.Name(name)); field != nil {
-		return field
-	}
-	return desc.Fields().ByJSONName(name)
-}
-
 func marshalSelected(options protojson.MarshalOptions, selected any) ([]byte, error) {
 	switch value := selected.(type) {
+	case selectedBody:
+		return marshalSelectedBody(options, value)
 	case proto.Message:
 		return options.Marshal(value)
 	case protoreflect.Message:
@@ -115,4 +136,27 @@ func marshalSelected(options protojson.MarshalOptions, selected any) ([]byte, er
 	default:
 		return json.Marshal(value)
 	}
+}
+
+func marshalSelectedBody(options protojson.MarshalOptions, selected selectedBody) ([]byte, error) {
+	raw, err := options.Marshal(selected.message)
+	if err != nil {
+		return nil, err
+	}
+	for _, field := range selected.fields {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return nil, err
+		}
+		name := field.JSONName()
+		if options.UseProtoNames {
+			name = string(field.Name())
+		}
+		next, ok := object[name]
+		if !ok {
+			return nil, fmt.Errorf("response field %q not found in marshaled body", field.Name())
+		}
+		raw = next
+	}
+	return raw, nil
 }

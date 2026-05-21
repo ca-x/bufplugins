@@ -1,6 +1,7 @@
 package binding
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,37 +42,38 @@ func NewDefaultBinder() DefaultBinder {
 	}
 }
 
-func (b DefaultBinder) Bind(_ context.Context, req Request, spec httpadapter.MethodSpec, rule httpadapter.HTTPBinding, dst proto.Message) error {
+func (b DefaultBinder) Bind(_ context.Context, req Request, _ httpadapter.MethodSpec, rule httpadapter.HTTPBinding, dst proto.Message) error {
 	if dst == nil {
 		return errors.New("bind request: nil destination")
 	}
-	if err := b.bindBody(req.HTTPRequest(), rule.Body, dst); err != nil {
+	consumed := make(consumedFields)
+	if err := b.bindBody(req.HTTPRequest(), rule, dst, consumed); err != nil {
 		return err
 	}
-	if err := bindValues(req.QueryParams(), dst, nil); err != nil {
+	if err := bindValues(req.QueryParams(), dst, consumed); err != nil {
 		return fmt.Errorf("bind query: %w", err)
 	}
 	if values, err := req.FormParams(); err != nil {
 		return fmt.Errorf("bind form: %w", err)
 	} else if len(values) > 0 {
-		if err := bindValues(values, dst, nil); err != nil {
+		if err := bindValues(values, dst, consumed); err != nil {
 			return fmt.Errorf("bind form: %w", err)
 		}
 	}
 	for _, param := range rule.PathParams {
-		value := req.PathParam(param.Name)
+		value := pathParamValue(req, param)
 		if value == "" {
 			continue
 		}
-		if err := setField(dst.ProtoReflect(), param.Field, []string{value}); err != nil {
+		if err := setPathField(dst.ProtoReflect(), param, []string{value}); err != nil {
 			return fmt.Errorf("bind path %q: %w", param.Name, err)
 		}
 	}
-	_ = spec
 	return nil
 }
 
-func (b DefaultBinder) bindBody(r *http.Request, selector string, dst proto.Message) error {
+func (b DefaultBinder) bindBody(r *http.Request, rule httpadapter.HTTPBinding, dst proto.Message, consumed consumedFields) error {
+	selector := rule.Body
 	if r == nil || r.Body == nil || selector == "" {
 		return nil
 	}
@@ -80,39 +82,51 @@ func (b DefaultBinder) bindBody(r *http.Request, selector string, dst proto.Mess
 		contentType = "application/json"
 	}
 	switch contentType {
-	case "application/json", "application/json; charset=utf-8":
+	case "application/json":
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return fmt.Errorf("read body: %w", err)
 		}
-		if len(strings.TrimSpace(string(body))) == 0 {
+		if len(bytes.TrimSpace(body)) == 0 {
 			return nil
 		}
 		if selector == "*" {
 			if err := b.UnmarshalOptions.Unmarshal(body, dst); err != nil {
 				return fmt.Errorf("decode json body: %w", err)
 			}
+			consumed.Add(selector)
 			return nil
 		}
 		var raw json.RawMessage
 		if err := json.Unmarshal(body, &raw); err != nil {
 			return fmt.Errorf("decode json body: %w", err)
 		}
-		field := dst.ProtoReflect().Descriptor().Fields().ByName(protoreflect.Name(selector))
-		if field == nil {
-			field = dst.ProtoReflect().Descriptor().Fields().ByJSONName(selector)
+		parent := dst.ProtoReflect()
+		fieldPath := rule.BodyFieldPath
+		if len(fieldPath) == 0 {
+			var err error
+			fieldPath, err = httpadapter.CompileFieldPath(parent.Descriptor(), selector)
+			if err != nil {
+				return fmt.Errorf("body field %q: %w", selector, err)
+			}
 		}
-		if field == nil {
-			return fmt.Errorf("body field %q not found", selector)
+		if len(fieldPath) > 1 {
+			var err error
+			parent, err = mutableMessageForPath(parent, fieldPath[:len(fieldPath)-1])
+			if err != nil {
+				return fmt.Errorf("body field %q: %w", selector, err)
+			}
 		}
-		holder := dynamicFieldMessage(dst, field)
+		field := fieldPath[len(fieldPath)-1]
+		holder := dynamicFieldMessage(parent, field)
 		if holder == nil {
 			return fmt.Errorf("body field %q is not a message", selector)
 		}
 		if err := b.UnmarshalOptions.Unmarshal(raw, holder); err != nil {
 			return fmt.Errorf("decode json body field %q: %w", selector, err)
 		}
-		dst.ProtoReflect().Set(field, protoreflect.ValueOfMessage(holder.ProtoReflect()))
+		parent.Set(field, protoreflect.ValueOfMessage(holder.ProtoReflect()))
+		consumed.Add(selector)
 		return nil
 	case "application/x-www-form-urlencoded", "multipart/form-data":
 		return nil
@@ -121,23 +135,48 @@ func (b DefaultBinder) bindBody(r *http.Request, selector string, dst proto.Mess
 	}
 }
 
-func dynamicFieldMessage(dst proto.Message, field protoreflect.FieldDescriptor) proto.Message {
-	msg := dst.ProtoReflect().NewField(field).Message()
+func dynamicFieldMessage(parent protoreflect.Message, field protoreflect.FieldDescriptor) proto.Message {
+	if field.IsList() || field.IsMap() || (field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind) {
+		return nil
+	}
+	msg := parent.NewField(field).Message()
 	if !msg.IsValid() {
 		return nil
 	}
 	return msg.Interface()
 }
 
-func bindValues(values url.Values, dst proto.Message, consumed map[string]struct{}) error {
+type consumedFields map[string]struct{}
+
+func (fields consumedFields) Add(selector string) {
+	if selector == "" || fields == nil {
+		return
+	}
+	fields[selector] = struct{}{}
+}
+
+func (fields consumedFields) Contains(selector string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	if _, ok := fields["*"]; ok {
+		return true
+	}
+	for consumed := range fields {
+		if selector == consumed || strings.HasPrefix(selector, consumed+".") {
+			return true
+		}
+	}
+	return false
+}
+
+func bindValues(values url.Values, dst proto.Message, consumed consumedFields) error {
 	for name, vals := range values {
 		if len(vals) == 0 {
 			continue
 		}
-		if consumed != nil {
-			if _, ok := consumed[name]; ok {
-				continue
-			}
+		if consumed.Contains(name) {
+			continue
 		}
 		if err := setField(dst.ProtoReflect(), name, vals); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
@@ -147,35 +186,42 @@ func bindValues(values url.Values, dst proto.Message, consumed map[string]struct
 }
 
 func setField(msg protoreflect.Message, selector string, values []string) error {
-	parts := strings.Split(selector, ".")
-	for i, part := range parts {
-		field := findField(msg.Descriptor(), part)
-		if field == nil {
-			return fmt.Errorf("field %q not found", selector)
-		}
-		if i < len(parts)-1 {
-			if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
-				return fmt.Errorf("field %q is not a message", part)
-			}
-			child := msg.Get(field).Message()
-			if !child.IsValid() {
-				child = msg.NewField(field).Message()
-				msg.Set(field, protoreflect.ValueOfMessage(child))
-			}
-			msg = child
-			continue
-		}
-		return assignField(msg, field, values)
+	fieldPath, err := httpadapter.CompileFieldPath(msg.Descriptor(), selector)
+	if err != nil {
+		return err
 	}
-	return nil
+	return setFieldPath(msg, fieldPath, values)
 }
 
-func findField(desc protoreflect.MessageDescriptor, name string) protoreflect.FieldDescriptor {
-	fields := desc.Fields()
-	if field := fields.ByName(protoreflect.Name(name)); field != nil {
-		return field
+func setPathField(msg protoreflect.Message, param httpadapter.PathParam, values []string) error {
+	fieldPath := param.FieldPath
+	if len(fieldPath) == 0 {
+		return setField(msg, param.Field, values)
 	}
-	return fields.ByJSONName(name)
+	return setFieldPath(msg, fieldPath, values)
+}
+
+func setFieldPath(msg protoreflect.Message, fieldPath []protoreflect.FieldDescriptor, values []string) error {
+	parent, err := mutableMessageForPath(msg, fieldPath[:len(fieldPath)-1])
+	if err != nil {
+		return err
+	}
+	return assignField(parent, fieldPath[len(fieldPath)-1], values)
+}
+
+func mutableMessageForPath(msg protoreflect.Message, fieldPath []protoreflect.FieldDescriptor) (protoreflect.Message, error) {
+	for _, field := range fieldPath {
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			return nil, fmt.Errorf("field %q is not a message", field.Name())
+		}
+		child := msg.Get(field).Message()
+		if !child.IsValid() {
+			child = msg.NewField(field).Message()
+			msg.Set(field, protoreflect.ValueOfMessage(child))
+		}
+		msg = child
+	}
+	return msg, nil
 }
 
 func assignField(msg protoreflect.Message, field protoreflect.FieldDescriptor, values []string) error {
@@ -237,4 +283,33 @@ func parseValue(field protoreflect.FieldDescriptor, raw string) (protoreflect.Va
 	default:
 		return protoreflect.Value{}, fmt.Errorf("unsupported field kind %s", field.Kind())
 	}
+}
+
+func pathParamValue(req Request, param httpadapter.PathParam) string {
+	if param.Template == "" {
+		return req.PathParam(param.Name)
+	}
+	segments := param.TemplateParts
+	if len(segments) == 0 {
+		segments = strings.Split(param.Template, "/")
+	}
+	values := make([]string, 0, len(segments))
+	nameIndex := 0
+	for _, segment := range segments {
+		switch segment {
+		case "*", "**":
+			if nameIndex >= len(param.Names) {
+				return ""
+			}
+			value := req.PathParam(param.Names[nameIndex])
+			nameIndex++
+			if value == "" {
+				return ""
+			}
+			values = append(values, value)
+		default:
+			values = append(values, segment)
+		}
+	}
+	return strings.Join(values, "/")
 }

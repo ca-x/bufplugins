@@ -3,6 +3,7 @@ package echoadapter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,12 +31,21 @@ func (r ServiceRegistrar) Register(e *echo.Echo) error {
 	if e == nil {
 		return adaptererrors.Wrap(adaptererrors.KindInternal, errors.New("register echo service: nil echo"))
 	}
+	for _, method := range r.Spec.Methods {
+		if (method.ClientStreaming || method.ServerStreaming) && len(method.HTTPBindings) > 0 {
+			return adaptererrors.Wrap(adaptererrors.KindInternal, errors.New("register echo service: streaming REST bindings are not supported for "+method.Procedure))
+		}
+	}
+	spec, err := httpadapter.CompileServiceSpec(r.Spec)
+	if err != nil {
+		return adaptererrors.Wrap(adaptererrors.KindInternal, fmt.Errorf("register echo service: %w", err))
+	}
 	group := e.Group(r.Config.GroupPrefix, r.Config.Middlewares...)
-	if r.ConnectHandler != nil && r.Spec.ConnectPath != "" {
-		connectPath := strings.TrimSuffix(r.Spec.ConnectPath, "/")
+	if r.ConnectHandler != nil && spec.ConnectPath != "" {
+		connectPath := strings.TrimSuffix(spec.ConnectPath, "/")
 		group.Any(connectPath+"/*", echo.WrapHandler(stripPrefix(r.Config.GroupPrefix, r.ConnectHandler)))
 	}
-	for _, method := range r.Spec.Methods {
+	for _, method := range spec.Methods {
 		if method.ClientStreaming || method.ServerStreaming {
 			continue
 		}
@@ -56,14 +66,54 @@ func stripPrefix(prefix string, next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		original := r.URL.Path
-		r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+		originalPath := r.URL.Path
+		originalRawPath := r.URL.RawPath
+		trimmedPath := strings.TrimPrefix(r.URL.Path, prefix)
+		pathChanged := trimmedPath != r.URL.Path
+		r.URL.Path = trimmedPath
 		if r.URL.Path == "" {
 			r.URL.Path = "/"
 		}
+		if r.URL.RawPath != "" && pathChanged {
+			r.URL.RawPath = trimRawPathPrefix(r.URL.RawPath, prefix, r.URL.Path)
+		}
 		next.ServeHTTP(w, r)
-		r.URL.Path = original
+		r.URL.Path = originalPath
+		r.URL.RawPath = originalRawPath
 	})
+}
+
+func trimRawPathPrefix(rawPath string, prefix string, decodedPath string) string {
+	for _, rawPrefix := range rawPathPrefixes(prefix) {
+		trimmed, ok := strings.CutPrefix(rawPath, rawPrefix)
+		if !ok {
+			continue
+		}
+		if trimmed == "" {
+			trimmed = "/"
+		}
+		decoded, err := url.PathUnescape(trimmed)
+		if err == nil && decoded == decodedPath {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func rawPathPrefixes(prefix string) []string {
+	escaped := escapePathPrefix(prefix)
+	if escaped == prefix {
+		return []string{prefix}
+	}
+	return []string{prefix, escaped}
+}
+
+func escapePathPrefix(prefix string) string {
+	parts := strings.Split(prefix, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }
 
 func (r ServiceRegistrar) handleREST(ctx context.Context, req echoRequest, resp echoResponse, spec httpadapter.MethodSpec, rule httpadapter.HTTPBinding) error {

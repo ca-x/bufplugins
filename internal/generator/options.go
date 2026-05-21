@@ -1,5 +1,10 @@
 package generator
 
+import (
+	"errors"
+	"strings"
+)
+
 type Options struct {
 	RuntimeImport        string
 	FileSuffix           string
@@ -14,4 +19,11 @@ func DefaultOptions() Options {
 		PackageSuffix:        "echo",
 		ConnectPackageSuffix: "connect",
 	}
+}
+
+func (o Options) Validate() error {
+	if strings.TrimSpace(o.RuntimeImport) == "" {
+		return errors.New("runtime_import must not be empty")
+	}
+	return nil
 }

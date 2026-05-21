@@ -18,6 +18,9 @@ const (
 )
 
 func GenerateFile(plugin *protogen.Plugin, file *protogen.File, opts Options) error {
+	if err := opts.Validate(); err != nil {
+		return err
+	}
 	if len(file.Services) == 0 {
 		return nil
 	}
@@ -44,12 +47,12 @@ func GenerateFile(plugin *protogen.Plugin, file *protogen.File, opts Options) er
 	echoRegistrarIdent := protogen.GoIdent{GoImportPath: echoAdapterImport, GoName: "ServiceRegistrar"}
 
 	for _, service := range file.Services {
-		connectImport := connectImportPath(file, opts.ConnectPackageSuffix)
-		if connectImport == echoImportPath && echoImportPath != file.GoImportPath {
+		connectGenImport := connectImportPath(file, opts.ConnectPackageSuffix)
+		if connectGenImport == echoImportPath && echoImportPath != file.GoImportPath {
 			return fmt.Errorf("%s: echo package import path and connect package import path both resolve to %q", file.Desc.Path(), echoImportPath)
 		}
-		handlerIdent := protogen.GoIdent{GoImportPath: connectImport, GoName: service.GoName + "Handler"}
-		newHandlerIdent := protogen.GoIdent{GoImportPath: connectImport, GoName: "New" + service.GoName + "Handler"}
+		handlerIdent := protogen.GoIdent{GoImportPath: connectGenImport, GoName: service.GoName + "Handler"}
+		newHandlerIdent := protogen.GoIdent{GoImportPath: connectGenImport, GoName: "New" + service.GoName + "Handler"}
 		registrarName := service.GoName + "EchoRegistrar"
 		constructorName := "New" + service.GoName + "EchoRegistrar"
 		registerName := "Register" + service.GoName + "ToEcho"
@@ -76,14 +79,14 @@ func GenerateFile(plugin *protogen.Plugin, file *protogen.File, opts Options) er
 		g.P("return (", g.QualifiedGoIdent(echoRegistrarIdent), "{Spec: spec, ConnectHandler: connectHandler, Config: cfg}).Register(e)")
 		g.P("}")
 		g.P()
-		if err := generateSpec(g, file, service, handlerIdent, specFuncName); err != nil {
+		if err := generateSpec(g, service, handlerIdent, specFuncName); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func generateSpec(g *protogen.GeneratedFile, file *protogen.File, service *protogen.Service, handlerIdent protogen.GoIdent, specFuncName string) error {
+func generateSpec(g *protogen.GeneratedFile, service *protogen.Service, handlerIdent protogen.GoIdent, specFuncName string) error {
 	serviceSpecIdent := protogen.GoIdent{GoImportPath: httpAdapterImport, GoName: "ServiceSpec"}
 	methodSpecIdent := protogen.GoIdent{GoImportPath: httpAdapterImport, GoName: "MethodSpec"}
 	bindingIdent := protogen.GoIdent{GoImportPath: httpAdapterImport, GoName: "HTTPBinding"}
@@ -101,12 +104,15 @@ func generateSpec(g *protogen.GeneratedFile, file *protogen.File, service *proto
 		if err != nil {
 			return err
 		}
+		if (method.Desc.IsStreamingClient() || method.Desc.IsStreamingServer()) && len(bindings) > 0 {
+			return fmt.Errorf("%s: google.api.http bindings for streaming RPCs are not supported", method.Desc.FullName())
+		}
 		g.P("{")
 		g.P("ServiceName: ", strconv.Quote(string(service.Desc.FullName())), ",")
 		g.P("ServiceGoName: ", strconv.Quote(service.GoName), ",")
 		g.P("Name: ", strconv.Quote(string(method.Desc.Name())), ",")
 		g.P("GoName: ", strconv.Quote(method.GoName), ",")
-		g.P("Procedure: ", strconv.Quote(procedureName(file, service, method)), ",")
+		g.P("Procedure: ", g.QualifiedGoIdent(procedureIdent(handlerIdent.GoImportPath, service, method)), ",")
 		g.P("RequestFactory: func() ", g.QualifiedGoIdent(messageIdent), " { return new(", g.QualifiedGoIdent(method.Input.GoIdent), ") },")
 		g.P("ResponseFactory: func() ", g.QualifiedGoIdent(messageIdent), " { return new(", g.QualifiedGoIdent(method.Output.GoIdent), ") },")
 		g.P("ClientStreaming: ", method.Desc.IsStreamingClient(), ",")
@@ -131,7 +137,20 @@ func generateSpec(g *protogen.GeneratedFile, file *protogen.File, service *proto
 				if len(binding.PathParams) > 0 {
 					g.P("PathParams: []", g.QualifiedGoIdent(pathParamIdent), "{")
 					for _, param := range binding.PathParams {
-						g.P("{Name: ", strconv.Quote(param.Name), ", Field: ", strconv.Quote(param.Field), "},")
+						g.P("{")
+						g.P("Name: ", strconv.Quote(param.Name), ",")
+						g.P("Field: ", strconv.Quote(param.Field), ",")
+						if param.Template != "" {
+							g.P("Template: ", strconv.Quote(param.Template), ",")
+						}
+						if len(param.Names) > 0 {
+							g.P("Names: []string{")
+							for _, name := range param.Names {
+								g.P(strconv.Quote(name), ",")
+							}
+							g.P("},")
+						}
+						g.P("},")
 					}
 					g.P("},")
 				}
@@ -145,6 +164,14 @@ func generateSpec(g *protogen.GeneratedFile, file *protogen.File, service *proto
 	g.P("}")
 	g.P("}")
 	g.P()
+	if len(service.Methods) > 0 {
+		g.P("const (")
+		for _, method := range service.Methods {
+			g.P(methodKeyConstName(service, method), " = ", strconv.Quote(httpadapterMethodKey(service, method)))
+		}
+		g.P(")")
+		g.P()
+	}
 	return nil
 }
 
@@ -156,8 +183,19 @@ func connectImportPath(file *protogen.File, suffix string) protogen.GoImportPath
 	return protogen.GoImportPath(path.Join(string(file.GoImportPath), connectPackage))
 }
 
-func procedureName(file *protogen.File, service *protogen.Service, method *protogen.Method) string {
-	return "/" + string(file.Desc.Package()) + "." + string(service.Desc.Name()) + "/" + string(method.Desc.Name())
+func procedureIdent(importPath protogen.GoImportPath, service *protogen.Service, method *protogen.Method) protogen.GoIdent {
+	return protogen.GoIdent{
+		GoImportPath: importPath,
+		GoName:       service.GoName + method.GoName + "Procedure",
+	}
+}
+
+func methodKeyConstName(service *protogen.Service, method *protogen.Method) string {
+	return service.GoName + method.GoName + "MethodKey"
+}
+
+func httpadapterMethodKey(service *protogen.Service, method *protogen.Method) string {
+	return service.GoName + "." + method.GoName
 }
 
 func unexported(name string) string {

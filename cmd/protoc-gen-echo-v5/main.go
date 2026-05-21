@@ -2,14 +2,22 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"os"
 
 	"github.com/ca-x/bufplugins/internal/generator"
+	"github.com/ca-x/bufplugins/internal/version"
 	"google.golang.org/protobuf/compiler/protogen"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/pluginpb"
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Printf("protoc-gen-echo-v5 %s\n", version.ProtocGenEchoV5)
+		return
+	}
+
 	var flags flag.FlagSet
 	opts := generator.DefaultOptions()
 	flags.StringVar(&opts.RuntimeImport, "runtime_import", opts.RuntimeImport, "Echo adapter runtime import path")

@@ -74,8 +74,12 @@ func WithRequestBinder(binder binding.RequestBinder) Option {
 }
 
 func WithMethodRequestBinder(service, method string, binder binding.RequestBinder) Option {
+	return WithMethodRequestBinderKey(httpadapter.MethodKey(service, method), binder)
+}
+
+func WithMethodRequestBinderKey(key string, binder binding.RequestBinder) Option {
 	return func(cfg *Config) {
-		cfg.MethodRequestBinders[methodKey(service, method)] = binder
+		cfg.MethodRequestBinders[key] = binder
 	}
 }
 
@@ -86,8 +90,12 @@ func WithResponseWriter(writer response.ResponseWriter) Option {
 }
 
 func WithMethodResponseWriter(service, method string, writer response.ResponseWriter) Option {
+	return WithMethodResponseWriterKey(httpadapter.MethodKey(service, method), writer)
+}
+
+func WithMethodResponseWriterKey(key string, writer response.ResponseWriter) Option {
 	return func(cfg *Config) {
-		cfg.MethodWriters[methodKey(service, method)] = writer
+		cfg.MethodWriters[key] = writer
 	}
 }
 
@@ -98,8 +106,12 @@ func WithValidator(validator validate.Validator) Option {
 }
 
 func WithMethodValidator(service, method string, validator validate.Validator) Option {
+	return WithMethodValidatorKey(httpadapter.MethodKey(service, method), validator)
+}
+
+func WithMethodValidatorKey(key string, validator validate.Validator) Option {
 	return func(cfg *Config) {
-		cfg.MethodValidators[methodKey(service, method)] = validator
+		cfg.MethodValidators[key] = validator
 	}
 }
 
@@ -110,8 +122,12 @@ func WithErrorMapper(mapper adaptererrors.ErrorMapper) Option {
 }
 
 func WithMethodErrorMapper(service, method string, mapper adaptererrors.ErrorMapper) Option {
+	return WithMethodErrorMapperKey(httpadapter.MethodKey(service, method), mapper)
+}
+
+func WithMethodErrorMapperKey(key string, mapper adaptererrors.ErrorMapper) Option {
 	return func(cfg *Config) {
-		cfg.MethodErrorMappers[methodKey(service, method)] = mapper
+		cfg.MethodErrorMappers[key] = mapper
 	}
 }
 
@@ -122,8 +138,12 @@ func WithErrorWriter(writer adaptererrors.ErrorWriter) Option {
 }
 
 func WithMethodErrorWriter(service, method string, writer adaptererrors.ErrorWriter) Option {
+	return WithMethodErrorWriterKey(httpadapter.MethodKey(service, method), writer)
+}
+
+func WithMethodErrorWriterKey(key string, writer adaptererrors.ErrorWriter) Option {
 	return func(cfg *Config) {
-		cfg.MethodErrorWriters[methodKey(service, method)] = writer
+		cfg.MethodErrorWriters[key] = writer
 	}
 }
 
@@ -160,8 +180,4 @@ func (c Config) errorWriter(spec httpadapter.MethodSpec) adaptererrors.ErrorWrit
 		return writer
 	}
 	return c.ErrorWriter
-}
-
-func methodKey(service, method string) string {
-	return service + "." + method
 }

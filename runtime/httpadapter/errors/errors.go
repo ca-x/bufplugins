@@ -99,7 +99,7 @@ func (DefaultWriter) WriteError(_ context.Context, resp Response, _ httpadapter.
 func statusFromConnectCode(code connect.Code) int {
 	switch code {
 	case connect.CodeCanceled:
-		return 499
+		return http.StatusRequestTimeout
 	case connect.CodeUnknown:
 		return http.StatusInternalServerError
 	case connect.CodeInvalidArgument:

@@ -18,6 +18,10 @@ go install ./cmd/protoc-gen-echo-v5
 
 `protoc-gen-echo-v5` must be on `PATH` when `buf generate` runs.
 
+```sh
+protoc-gen-echo-v5 --version
+```
+
 ## Buf Configuration
 
 Use the normal Go and Connect plugins plus the Echo plugin:
@@ -94,6 +98,7 @@ if err := registrar.Register(e); err != nil {
 The runtime keeps common behavior replaceable:
 
 - `WithRequestBinder` and `WithMethodRequestBinder` for path/query/form/body binding.
+- `WithMethodRequestBinderKey`, `WithMethodResponseWriterKey`, and similar key-based options for generated method key constants.
 - `WithValidator` for `buf.build/go/protovalidate`.
 - `WithResponseWriter` for envelopes, redirects, headers, and custom status behavior.
 - `WithErrorMapper` and `WithErrorWriter` for independent REST error policy.

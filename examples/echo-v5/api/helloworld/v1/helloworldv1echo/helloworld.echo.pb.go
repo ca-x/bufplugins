@@ -45,7 +45,7 @@ func greeterServiceEchoSpec(svc helloworldv1connect.GreeterServiceHandler) httpa
 				ServiceGoName:   "GreeterService",
 				Name:            "SayHello",
 				GoName:          "SayHello",
-				Procedure:       "/helloworld.v1.GreeterService/SayHello",
+				Procedure:       helloworldv1connect.GreeterServiceSayHelloProcedure,
 				RequestFactory:  func() proto.Message { return new(v1.SayHelloRequest) },
 				ResponseFactory: func() proto.Message { return new(v1.SayHelloResponse) },
 				ClientStreaming: false,
@@ -64,7 +64,10 @@ func greeterServiceEchoSpec(svc helloworldv1connect.GreeterServiceHandler) httpa
 						Body:         "",
 						ResponseBody: "",
 						PathParams: []httpadapter.PathParam{
-							{Name: "name", Field: "name"},
+							{
+								Name:  "name",
+								Field: "name",
+							},
 						},
 					},
 				},
@@ -74,7 +77,7 @@ func greeterServiceEchoSpec(svc helloworldv1connect.GreeterServiceHandler) httpa
 				ServiceGoName:   "GreeterService",
 				Name:            "LuckySearch",
 				GoName:          "LuckySearch",
-				Procedure:       "/helloworld.v1.GreeterService/LuckySearch",
+				Procedure:       helloworldv1connect.GreeterServiceLuckySearchProcedure,
 				RequestFactory:  func() proto.Message { return new(v1.LuckySearchRequest) },
 				ResponseFactory: func() proto.Message { return new(v1.LuckySearchResponse) },
 				ClientStreaming: false,
@@ -93,7 +96,10 @@ func greeterServiceEchoSpec(svc helloworldv1connect.GreeterServiceHandler) httpa
 						Body:         "",
 						ResponseBody: "",
 						PathParams: []httpadapter.PathParam{
-							{Name: "keyword", Field: "keyword"},
+							{
+								Name:  "keyword",
+								Field: "keyword",
+							},
 						},
 					},
 				},
@@ -103,7 +109,7 @@ func greeterServiceEchoSpec(svc helloworldv1connect.GreeterServiceHandler) httpa
 				ServiceGoName:   "GreeterService",
 				Name:            "CreateGreeting",
 				GoName:          "CreateGreeting",
-				Procedure:       "/helloworld.v1.GreeterService/CreateGreeting",
+				Procedure:       helloworldv1connect.GreeterServiceCreateGreetingProcedure,
 				RequestFactory:  func() proto.Message { return new(v1.CreateGreetingRequest) },
 				ResponseFactory: func() proto.Message { return new(v1.CreateGreetingResponse) },
 				ClientStreaming: false,
@@ -127,3 +133,9 @@ func greeterServiceEchoSpec(svc helloworldv1connect.GreeterServiceHandler) httpa
 		},
 	}
 }
+
+const (
+	GreeterServiceSayHelloMethodKey       = "GreeterService.SayHello"
+	GreeterServiceLuckySearchMethodKey    = "GreeterService.LuckySearch"
+	GreeterServiceCreateGreetingMethodKey = "GreeterService.CreateGreeting"
+)

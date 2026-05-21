@@ -20,8 +20,10 @@ type httpBinding struct {
 }
 
 type pathParam struct {
-	Name  string
-	Field string
+	Name     string
+	Field    string
+	Template string
+	Names    []string
 }
 
 func methodBindings(method *protogen.Method) ([]httpBinding, error) {
@@ -102,23 +104,111 @@ var pathVariablePattern = regexp.MustCompile(`\{([^}=]+)(=([^}]+))?\}`)
 
 func googlePathToEcho(path string) (string, []pathParam, error) {
 	var params []pathParam
-	converted := pathVariablePattern.ReplaceAllStringFunc(path, func(match string) string {
-		parts := pathVariablePattern.FindStringSubmatch(match)
-		field := parts[1]
-		name := sanitizeParamName(field)
-		if parts[3] == "**" {
-			name = "*"
+	usedNames := make(map[string]string)
+	var converted strings.Builder
+	var convertErr error
+	last := 0
+	matches := pathVariablePattern.FindAllStringSubmatchIndex(path, -1)
+	for _, match := range matches {
+		converted.WriteString(path[last:match[0]])
+		field := path[match[2]:match[3]]
+		template := ""
+		if match[6] >= 0 {
+			template = path[match[6]:match[7]]
 		}
-		params = append(params, pathParam{Name: name, Field: field})
-		if name == "*" {
-			return "*"
+		route, param, err := pathVariableToEcho(path, field, template, match[1] == len(path), usedNames)
+		if err != nil {
+			convertErr = err
+			break
 		}
-		return ":" + name
-	})
-	if strings.Contains(converted, "{") || strings.Contains(converted, "}") {
+		converted.WriteString(route)
+		params = append(params, param)
+		last = match[1]
+	}
+	if convertErr != nil {
+		return "", nil, convertErr
+	}
+	converted.WriteString(path[last:])
+	convertedPath := converted.String()
+	if strings.Contains(convertedPath, "{") || strings.Contains(convertedPath, "}") {
 		return "", nil, fmt.Errorf("invalid path template %q", path)
 	}
-	return converted, params, nil
+	return convertedPath, params, nil
+}
+
+func pathVariableToEcho(path, field, template string, variableAtPathEnd bool, usedNames map[string]string) (string, pathParam, error) {
+	if template == "" {
+		name := sanitizeParamName(field)
+		if err := registerPathParamName(path, usedNames, name, field); err != nil {
+			return "", pathParam{}, err
+		}
+		return ":" + name, pathParam{Name: name, Field: field}, nil
+	}
+	if template == "**" {
+		if !variableAtPathEnd {
+			return "", pathParam{}, fmt.Errorf("deep wildcard path variable %q must end the Echo route in template %q", field, path)
+		}
+		if err := registerPathParamName(path, usedNames, "*", field); err != nil {
+			return "", pathParam{}, err
+		}
+		return "*", pathParam{Name: "*", Field: field}, nil
+	}
+
+	segments := strings.Split(template, "/")
+	routeSegments := make([]string, 0, len(segments))
+	names := make([]string, 0, len(segments))
+	for i, segment := range segments {
+		switch segment {
+		case "":
+			return "", pathParam{}, fmt.Errorf("invalid empty segment in path variable %q in template %q", field, path)
+		case "*":
+			name := allocatePathParamName(usedNames, sanitizeParamName(field), field)
+			routeSegments = append(routeSegments, ":"+name)
+			names = append(names, name)
+		case "**":
+			if i != len(segments)-1 {
+				return "", pathParam{}, fmt.Errorf("deep wildcard must be the last segment in path variable %q in template %q", field, path)
+			}
+			if !variableAtPathEnd {
+				return "", pathParam{}, fmt.Errorf("deep wildcard path variable %q must end the Echo route in template %q", field, path)
+			}
+			if err := registerPathParamName(path, usedNames, "*", field); err != nil {
+				return "", pathParam{}, err
+			}
+			routeSegments = append(routeSegments, "*")
+			names = append(names, "*")
+		default:
+			if strings.Contains(segment, "*") {
+				return "", pathParam{}, fmt.Errorf("invalid wildcard segment %q in path variable %q in template %q", segment, field, path)
+			}
+			routeSegments = append(routeSegments, segment)
+		}
+	}
+
+	return strings.Join(routeSegments, "/"), pathParam{
+		Field:    field,
+		Template: template,
+		Names:    names,
+	}, nil
+}
+
+func registerPathParamName(path string, usedNames map[string]string, name, field string) error {
+	if previous, ok := usedNames[name]; ok {
+		return fmt.Errorf("path template %q has colliding route parameter name %q for fields %q and %q", path, name, previous, field)
+	}
+	usedNames[name] = field
+	return nil
+}
+
+func allocatePathParamName(usedNames map[string]string, base, field string) string {
+	name := base
+	for suffix := 1; ; suffix++ {
+		if _, ok := usedNames[name]; !ok {
+			usedNames[name] = field
+			return name
+		}
+		name = fmt.Sprintf("%s_%d", base, suffix)
+	}
 }
 
 func sanitizeParamName(name string) string {
